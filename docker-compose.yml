@@ -1,18 +1,39 @@
-version: "3.9"
-
 services:
-  db:
+  postgres:
     image: postgres:15
-    container_name: postgres-db
-    restart: always
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: analytics_db
+    container_name: ssa-postgres
     ports:
-      - "5432:5432"
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: selfservicedb
+      POSTGRES_USER: ssauser
+      POSTGRES_PASSWORD: ssapassword
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata_ssa:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ssauser -d selfservicedb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    # Tells Docker to build an image using the Dockerfile in the 'backend' directory
+    build: ./backend
+    container_name: ssa-backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://ssauser:ssapassword@postgres:5432/selfservicedb
+      OPENAI_API_KEY: ${OPENAI_API_KEY} # Reads from a .env file or your shell
+    volumes:
+      # This is the key for live code reloading. It maps your local code
+      # into the container, overwriting the code that was copied during the build.
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # We can override the Dockerfile's CMD here to add --reload for development
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
 volumes:
-  pgdata:
+  pgdata_ssa:

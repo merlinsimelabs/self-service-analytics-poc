@@ -3,108 +3,89 @@ import zipfile
 import tempfile
 import pandas as pd
 import shutil
-import json
 from uuid import uuid4
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from .config import engine
-from .utils import save_schema_metadata, detect_relationships
-
+from .utils import save_schema_metadata, get_schema_from_llm
+from sqlalchemy import text
 router = APIRouter()
 
 
 @router.post("/upload-zip")
 async def upload_zip(
     file: UploadFile = File(...),
-    schema_file: UploadFile = File(None)
+    catalog: str = Form(...)
 ):
     """
-    Upload a ZIP containing CSV/XLSX files and optionally a schema JSON file.
-    Extracts data, stores it in a new schema in PostgreSQL, and saves metadata.
+    Uploads a ZIP of CSV/XLSX files, uses an LLM to infer the schema based on
+    a user-provided catalog, stores data in PostgreSQL, and saves the metadata.
     """
     if not file.filename.endswith(".zip"):
         raise HTTPException(
-            status_code=400,
-            detail="File must be a ZIP"
-                           )
+            status_code=400, detail="File must be a ZIP archive.")
+
+    if not catalog:
+        raise HTTPException(
+            status_code=400, detail="A catalog description is required.")
 
     dataset_id = str(uuid4())
     schema_name = f"dataset_{dataset_id.replace('-', '_')}"
 
-    # Create new schema in DB
+    # Create new schema in the database
     with engine.connect() as conn:
-        conn.execute(f"CREATE SCHEMA {schema_name}")
+        conn.execute(text(f"CREATE SCHEMA {schema_name}"))
+        conn.commit()
 
-    # Temporary directory for ZIP extraction
     with tempfile.TemporaryDirectory() as tmpdir:
         zip_path = os.path.join(tmpdir, file.filename)
+        with open(zip_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
 
-        # Save uploaded ZIP
-        with open(zip_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
-
-        # Extract ZIP contents
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(tmpdir)
 
-        table_metadata = {}
         tables_dfs = {}
-
-        # Process each file in extracted folder
+        # Process each file and load it into the database
         for fname in os.listdir(tmpdir):
             fpath = os.path.join(tmpdir, fname)
-
-            if not os.path.isfile(fpath):
+            if not os.path.isfile(fpath) or fname.startswith('__MACOSX'):
                 continue
-
-            if not (fname.endswith(".csv") or fname.endswith(".xlsx")):
-                continue
-
-            table_name = os.path.splitext(fname)[0].lower()
 
             if fname.endswith(".csv"):
                 df = pd.read_csv(fpath)
-            else:
+            elif fname.endswith(".xlsx"):
                 df = pd.read_excel(fpath)
+            else:
+                continue
+
+            table_name = os.path.splitext(fname)[0].lower().replace(" ", "_")
+            tables_dfs[table_name] = df
 
             # Store table in PostgreSQL
             df.to_sql(
                 table_name,
                 engine,
                 schema=schema_name,
-                if_exists="replace", index=False
-                )
+                if_exists="replace",
+                index=False
+            )
 
-            # columns for metadata
-            columns_info = [
-                {"name": col, "dtype": str(df[col].dtype)}
-                for col in df.columns
-                ]
-            table_metadata[table_name] = columns_info
-            tables_dfs[table_name] = df
+        if not tables_dfs:
+            raise HTTPException(
+                status_code=400, detail="No valid CSV or XLSX"
+                                        "files found in the ZIP.")
 
-        # Use provided schema file if available
-        if schema_file:
-            try:
-                schema_content = schema_file.file.read().decode("utf-8")
-                user_schema = json.loads(schema_content)
-                full_metadata = user_schema
-            except json.JSONDecodeError:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Invalid JSON schema file"
-                    )
-        else:
-            relationships = detect_relationships(tables_dfs)
-            full_metadata = {
-                "tables": table_metadata,
-                "relationships": relationships
-            }
+        # Use LLM to generate the schema metadata
+        try:
+            full_metadata = get_schema_from_llm(tables_dfs, catalog)
+        except ValueError as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
-        # Saving metadata to DB
+        # Save the generated metadata to the database
         save_schema_metadata(engine, dataset_id, schema_name, full_metadata)
 
     return {
-        "message": "Dataset uploaded and stored successfully",
+        "message": "Dataset uploaded and schema generated successfully.",
         "dataset_id": dataset_id,
         "schema_name": schema_name,
         "metadata": full_metadata

@@ -1,22 +1,29 @@
 import streamlit as st
 import requests
+import pandas as pd
 
-BACKEND_URL = "http://localhost:8000"
+BACKEND_URL = "http://localhost:8000/api"
 
 st.title("Self-Service Analytics")
 
 
 st.header("Upload Dataset")
 uploaded_file = st.file_uploader("Upload ZIP file", type="zip")
-schema_file = st.file_uploader("Optional schema (JSON)", type="json")
+catalog_desc = st.text_area(
+    "Provide a brief description of the dataset (the catalog)")
+
 
 if st.button("Upload to Backend"):
-    if uploaded_file:
-        files = {"file": uploaded_file}
-        if schema_file:
-            files["schema_file"] = schema_file
+    if uploaded_file and catalog_desc:
+        # Use a dictionary for the files part
+        files = {"file": (
+            uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+        # Use a dictionary for the form data part
+        data = {"catalog": catalog_desc}
 
-        response = requests.post(f"{BACKEND_URL}/upload-zip", files=files)
+        # The endpoint is /upload-zip
+        response = requests.post(
+            f"{BACKEND_URL}/upload-zip", files=files, data=data)
 
         if response.status_code == 200:
             st.success("Upload successful!")
@@ -24,7 +31,8 @@ if st.button("Upload to Backend"):
         else:
             st.error(f"Upload failed: {response.text}")
     else:
-        st.warning("Please upload a ZIP file.")
+        st.warning(
+            "Please upload a ZIP file and provide a catalog description.")
 
 # Query
 st.header("Query Dataset")
@@ -32,18 +40,31 @@ dataset_id = st.text_input("Enter Dataset ID")
 question = st.text_area("Enter your question")
 
 if st.button("Run Query"):
-    payload = {"dataset_id": dataset_id, "question": question}
-    response = requests.post(f"{BACKEND_URL}/query", json=payload)
-
-    if response.status_code == 200:
-        result = response.json()
-        st.subheader("Generated SQL")
-        st.code(result["sql"], language="sql")
-
-        st.subheader("Chart Type Suggested")
-        st.write(result["chart_type"])
-
-        st.subheader("Query Results")
-        st.dataframe(result["result"])
+    if not dataset_id or not question:
+        st.warning("Please provide both a Dataset ID and a question.")
     else:
-        st.error(f"Query failed: {response.text}")
+        payload = {"dataset_id": dataset_id, "question": question}
+        # The endpoint is /query
+        response = requests.post(f"{BACKEND_URL}/query", json=payload)
+
+        if response.status_code == 200:
+            result = response.json()
+            st.subheader("Generated SQL")
+            st.code(result["sql_query"], language="sql")
+
+            # --- FIX STARTS HERE ---
+            st.subheader("Chart Suggestion")
+            chart_info = result["chart_suggestion"]
+            st.write(f"**Chart Type:** {chart_info['chart_type']}")
+            st.write(f"**Reasoning:** {chart_info['reasoning']}")
+
+            st.subheader("Query Results")
+            # Access the 'results' key (plural)
+            results_data = result["results"]
+            if results_data:
+                st.dataframe(pd.DataFrame(results_data))
+            else:
+                st.write("Query returned no results.")
+            # --- FIX ENDS HERE ---
+        else:
+            st.error(f"Query failed: {response.text}")
