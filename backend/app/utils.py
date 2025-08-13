@@ -9,11 +9,9 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def save_schema_metadata(engine, dataset_id, schema_name, metadata):
     """Store schema metadata for later use in LLM prompts."""
-    # Convert metadata dict to a JSON string
     metadata_json = json.dumps(metadata)
 
     with engine.connect() as conn:
-        # Use sqlalchemy.text for parameter binding to prevent SQL injection
         stmt = text("""
             INSERT INTO dataset_metadata
             (dataset_id, schema_name, table_metadata)
@@ -43,9 +41,12 @@ def get_schema_from_llm(tables_dfs: dict, user_catalog: str):
         prompt_context += "Columns:\n"
         for col in df.columns:
             dtype = str(df[col].dtype)
-            # Take a small, non-null sample for context
+
             sample_data = df[col].dropna().head(3).tolist()
-            prompt_context += f"- {col} (type: {dtype},sample_data: {sample_data})\n"
+            prompt_context += (
+               f"- {col} (type: {dtype}, sample_data: {sample_data})\n"
+                )
+
         prompt_context += "\n"
 
     system_prompt = f"""
@@ -137,6 +138,17 @@ def get_sql_from_llm(metadata: dict, schema_name: str, question: str) -> str:
     IMPORTANT RULES:
     - ALWAYS qualify table names with the schema name: `{schema_name}`.
       For example: `SELECT * FROM {schema_name}.orders;`.
+    - If you need to perform date or time operations (like DATE_TRUNC, EXTRACT,
+      or using INTERVAL) on a column that is of type 'object' or 'text' in the
+      schema, you MUST explicitly cast it to a date or timestamp. For example,
+      use `o.order_date::date` or `CAST(o.order_date AS DATE)`.
+    - When a query requires both aggregation (like `SUM`, `AVG` with a
+      `GROUP BY`) and a window function (`OVER (...)`), you MUST use a
+      Common Table Expression (CTE). First, create a CTE that performs the
+      aggregation. Then, select from the CTE and apply the window function to
+      the aggregated column. For example: `WITH daily_sales AS (SELECT date,
+      SUM(amount) as total_sales FROM sales GROUP BY date) SELECT date,
+      AVG(total_sales) OVER (...) FROM daily_sales;`
     - Your response must be ONLY the raw SQL query, with no additional text,
       explanations, or markdown.
     """
@@ -150,10 +162,14 @@ def get_sql_from_llm(metadata: dict, schema_name: str, question: str) -> str:
             ],
             temperature=0
         )
-        sql_query = llm_response.choices[0].message.content.strip().replace("`", "").replace("sql", "")
+        sql_query = (
+                      llm_response.choices[0]
+                      .message.content.strip()
+                      .replace("`", "")
+                      .replace("sql", "")
+                  )
         return sql_query
     except Exception as e:
-        # Raise a specific error that the API endpoint can catch
         raise ValueError(f"Failed to generate SQL from LLM. Error: {e}")
 
 

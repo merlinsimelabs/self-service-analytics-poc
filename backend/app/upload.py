@@ -1,6 +1,7 @@
 import os
 import zipfile
 import tempfile
+import json
 import pandas as pd
 import shutil
 from uuid import uuid4
@@ -31,7 +32,6 @@ async def upload_zip(
     dataset_id = str(uuid4())
     schema_name = f"dataset_{dataset_id.replace('-', '_')}"
 
-    # Create new schema in the database
     with engine.connect() as conn:
         conn.execute(text(f"CREATE SCHEMA {schema_name}"))
         conn.commit()
@@ -45,7 +45,7 @@ async def upload_zip(
             zip_ref.extractall(tmpdir)
 
         tables_dfs = {}
-        # Process each file and load it into the database
+
         for fname in os.listdir(tmpdir):
             fpath = os.path.join(tmpdir, fname)
             if not os.path.isfile(fpath) or fname.startswith('__MACOSX'):
@@ -61,7 +61,6 @@ async def upload_zip(
             table_name = os.path.splitext(fname)[0].lower().replace(" ", "_")
             tables_dfs[table_name] = df
 
-            # Store table in PostgreSQL
             df.to_sql(
                 table_name,
                 engine,
@@ -75,13 +74,13 @@ async def upload_zip(
                 status_code=400, detail="No valid CSV or XLSX"
                                         "files found in the ZIP.")
 
-        # Use LLM to generate the schema metadata
         try:
             full_metadata = get_schema_from_llm(tables_dfs, catalog)
+            print("--- Generated Schema Metadata ---")
+            print(json.dumps(full_metadata, indent=2))
         except ValueError as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-        # Save the generated metadata to the database
         save_schema_metadata(engine, dataset_id, schema_name, full_metadata)
 
     return {

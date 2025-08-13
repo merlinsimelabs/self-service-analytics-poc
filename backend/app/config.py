@@ -10,7 +10,7 @@ if not DATABASE_URL:
 
 engine = create_engine(DATABASE_URL)
 
-# Create metadata table on startup if it doesn't exist
+
 with engine.connect() as conn:
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS dataset_metadata (
