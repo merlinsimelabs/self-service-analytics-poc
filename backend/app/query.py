@@ -1,107 +1,82 @@
 import json
-import os
 import pandas as pd
-from fastapi import APIRouter, Body, HTTPException
+from typing import List, Dict, Any
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import text
+
 from .config import engine
-from openai import OpenAI
+from .utils import get_sql_from_llm, get_chart_suggestion_from_llm
+
 router = APIRouter()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+class QueryRequest(BaseModel):
+    dataset_id: str = Field(
+        ..., description="The unique ID of the dataset to query.")
+    question: str = Field(
+        ..., description="The natural language question from the user.")
 
 
-@router.post("/query")
-async def run_query(payload: dict = Body(...)):
-    dataset_id = payload.get("dataset_id")
-    question = payload.get("question")
+class ChartSuggestion(BaseModel):
+    chart_type: str
+    reasoning: str
 
-    if not dataset_id or not question:
-        raise HTTPException(
-            status_code=400,
-            detail="dataset_id and question are required"
-        )
 
-    # Fetch schema name and metadata from DB
-    with engine.connect() as conn:
-        sql_meta = text(
-            """
-            SELECT schema_name, table_metadata
-            FROM dataset_metadata
-            WHERE dataset_id = :id
-            """
-        )
-        result = conn.execute(sql_meta, {"id": dataset_id}).fetchone()
+class QueryResponse(BaseModel):
+    dataset_id: str
+    sql_query: str
+    chart_suggestion: ChartSuggestion
+    results: List[Dict[str, Any]]
 
-    if not result:
-        raise HTTPException(status_code=404, detail="Dataset not found")
 
-    schema_name, metadata = result
-
-    # Prepare LLM prompt for SQL generation
-    system_prompt = f"""
-    You are an expert SQL query generator.
-    Given a database schema and user question, write a SQL query that
-    answers it.
-
-    Schema (in JSON):
-    {json.dumps(metadata, indent=2)}
-
-    IMPORTANT:
-    - Use schema name: {schema_name}
-    - Fully qualify table names with schema name (e.g., {schema_name}.orders)
-    - Do not use LIMIT unless user asks.
-    - Return only SQL, no explanation.
+@router.post("/query", response_model=QueryResponse, tags=["Query"])
+async def run_query(request: QueryRequest) -> QueryResponse:
     """
-
-    llm_sql = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question}
-        ],
-        temperature=0
-    )
-
-    sql_query = llm_sql.choices[0].message.content.strip()
-
-    # Execute generated SQL
+    Takes a natural language question and a dataset_id, generates and executes
+    a SQL query,and returns the results along with a chart suggestion.
+    """
     try:
         with engine.connect() as conn:
-            query_result = pd.read_sql(text(sql_query), conn)
+            result = conn.execute(text(
+                "SELECT schema_name, table_metadata FROM dataset_metadata "
+                "WHERE dataset_id = :id"
+            ), {"id": request.dataset_id}).fetchone()
+
+            if not result:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Dataset with ID '{request.dataset_id}' not found")
+
+            schema_name, metadata = result
+            metadata = (
+                        json.loads(metadata)
+                        if isinstance(metadata, str)
+                        else metadata
+                    )
+
+            sql_query = get_sql_from_llm(
+                metadata, schema_name, request.question)
+
+            results_df = pd.read_sql(text(sql_query), conn)
+
+            chart_suggestion_dict = get_chart_suggestion_from_llm(
+                                            request.question, results_df)
+
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"SQL execution error: {str(e)}"
-        )
+        raise HTTPException(status_code=400,
+                            detail=f"An error occurred during query"
+                                   f"execution: {str(e)}")
 
-    # Prepare LLM prompt for chart suggestion
-    chart_prompt = f"""
-    You are a data visualization expert.
-    Given the following query result columns, suggest the most
-    appropriate chart type.
-
-    Columns: {list(query_result.columns)}
-    Example chart types: bar, line, pie, scatter, table.
-
-    Respond with only one word for chart type.
-    """
-
-    data_preview = query_result.head(5).to_dict(orient="records")
-
-    llm_chart = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": chart_prompt},
-            {"role": "user", "content": f"Data preview: {data_preview}"},
-        ],
-        temperature=0
+    response_data = QueryResponse(
+        dataset_id=request.dataset_id,
+        sql_query=sql_query,
+        chart_suggestion=ChartSuggestion(**chart_suggestion_dict),
+        results=results_df.to_dict(orient="records")
     )
+    print("Backend Response:", response_data.json())
 
-    chart_type = llm_chart.choices[0].message.content.strip().lower()
-
-    return {
-        "dataset_id": dataset_id,
-        "sql": sql_query,
-        "chart_type": chart_type,
-        "result": query_result.to_dict(orient="records")
-    }
+    return response_data
