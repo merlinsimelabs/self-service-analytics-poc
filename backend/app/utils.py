@@ -7,25 +7,33 @@ import pandas as pd
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
-def save_schema_metadata(engine, dataset_id, schema_name, metadata):
-    """Store schema metadata for later use in LLM prompts."""
+def save_schema_metadata(
+        conn, dataset_id, user_id, user_defined_name, schema_name, metadata):
+    """Store the complete dataset metadata in the catalog using a
+    provided transaction."""
     metadata_json = json.dumps(metadata)
 
-    with engine.connect() as conn:
-        stmt = text("""
-            INSERT INTO dataset_metadata
-            (dataset_id, schema_name, table_metadata)
-            VALUES (:dataset_id, :schema_name, :table_metadata)
-            ON CONFLICT (dataset_id) DO UPDATE SET
-            schema_name = EXCLUDED.schema_name,
-            table_metadata = EXCLUDED.table_metadata;
-        """)
-        conn.execute(stmt, {
-            "dataset_id": dataset_id,
-            "schema_name": schema_name,
-            "table_metadata": metadata_json
-        })
-        conn.commit()
+    stmt = text("""
+        INSERT INTO dataset_metadata(
+                dataset_id,
+                user_id,
+                user_defined_name,
+                schema_name,
+                table_metadata
+                )VALUES (
+                :dataset_id,
+                :user_id,
+                :user_defined_name,
+                :schema_name,
+                :table_metadata)
+    """)
+    conn.execute(stmt, {
+        "dataset_id": dataset_id,
+        "user_id": user_id,
+        "user_defined_name": user_defined_name,
+        "schema_name": schema_name,
+        "table_metadata": metadata_json
+    })
 
 
 def get_schema_from_llm(tables_dfs: dict, user_catalog: str):
