@@ -15,9 +15,12 @@ with engine.connect() as conn:
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS dataset_metadata (
             dataset_id TEXT PRIMARY KEY,
-            schema_name TEXT,
+            user_id TEXT, -- Placeholder for future multi-user support
+            user_defined_name TEXT UNIQUE NOT NULL, -- The user's unique name
+            schema_name TEXT UNIQUE NOT NULL, -- The internal schema name
+            created_at TIMESTAMPTZ DEFAULT NOW(), -- The time of creation
             table_metadata JSONB
-        )
+        );
     """))
     conn.commit()
 
