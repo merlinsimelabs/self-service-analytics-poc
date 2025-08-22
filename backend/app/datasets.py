@@ -1,40 +1,40 @@
-from typing import List
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
 from sqlalchemy import text
+from fastapi import APIRouter
 from .config import engine
+from .utils import UniformResponse
 
 router = APIRouter()
 
 
-class DatasetInfo(BaseModel):
-    dataset_id: str
-    user_defined_name: str
-
-
-@router.get("/datasets", response_model=List[DatasetInfo], tags=["Datasets"])
-async def get_all_datasets():
-    """
-    Retrieves a list of all uploaded datasets to be displayed in the UI.
-    It returns the user-defined name for display and the unique
-    dataset_id for querying.
-    """
+@router.get("/datasets")
+async def get_datasets():
     try:
         with engine.connect() as conn:
-            result = conn.execute(text(
-                "SELECT dataset_id, user_defined_name FROM dataset_metadata "
-                "ORDER BY created_at DESC"
-            )).fetchall()
-
-            # Convert the list of database rows into a list of dictionaries
-            # that matches our DatasetInfo model
+            result = conn.execute(
+                text("SELECT dataset_id, user_defined_name, schema_name "
+                     "FROM dataset_metadata")
+            )
             datasets = [
-                {"dataset_id": row[0],
-                 "user_defined_name": row[1]} for row in result
+                {
+                    "id": row.dataset_id,
+                    "name": row.user_defined_name,
+                    "schema": row.schema_name
+                }
+                for row in result
             ]
-            return datasets
+
+        return UniformResponse(
+            data=datasets if datasets else [],
+            status=200,
+            message="Datasets fetched successfully." if datasets else
+                    "No datasets available.",
+            data_status="success"
+        )
+
     except Exception as e:
-        # If anything goes wrong, return a server error
-        raise HTTPException(
-            status_code=500,
-            detail=f"An error occurred while fetching datasets: {str(e)}")
+        return UniformResponse(
+            error={"code": "INTERNAL_SERVER_ERROR", "details": [str(e)]},
+            status=500,
+            message="An unexpected error occurred while fetching datasets.",
+            data_status="failure"
+        )
