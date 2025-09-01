@@ -172,6 +172,10 @@ def get_sql_from_llm(metadata: dict, schema_name: str, question: str) -> str:
       the aggregated column. For example: `WITH daily_sales AS (SELECT date,
       SUM(amount) as total_sales FROM sales GROUP BY date) SELECT date,
       AVG(total_sales) OVER (...) FROM daily_sales;`
+    - When combining results from multiple SELECT statements:
+      * Use **UNION** if you need to eliminate duplicates across result sets.
+      * Use **UNION ALL** if you need to keep duplicates (better performance).
+      * Choose based on the semantics of the question.
     - Your response must be ONLY the raw SQL query, with no additional text,
       explanations, or markdown.
     """
