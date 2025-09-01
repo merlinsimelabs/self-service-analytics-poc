@@ -4,7 +4,22 @@ from openai import OpenAI
 import os
 import pandas as pd
 
+from fastapi.responses import JSONResponse
+
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+class UniformResponse(JSONResponse):
+    def __init__(self, data=None, error=None, status=200, message="",
+                 data_status="success"):
+        content = {
+            "status": status,
+            "data_status": data_status,
+            "message": message,
+            "data": data if data is not None else {},
+            "error": error if error is not None else {}
+        }
+        super().__init__(status_code=status, content=content)
 
 
 def save_schema_metadata(
