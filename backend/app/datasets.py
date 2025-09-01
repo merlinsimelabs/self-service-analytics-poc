@@ -2,17 +2,31 @@ from sqlalchemy import text
 from fastapi import APIRouter
 from .config import engine
 from .utils import UniformResponse
+from typing import List
+from pydantic import BaseModel
+
 
 router = APIRouter()
 
 
-@router.get("/datasets")
+class DatasetInfo(BaseModel):
+    dataset_id: str
+    user_defined_name: str
+
+
+@router.get("/datasets", response_model=List[DatasetInfo], tags=["Datasets"])
 async def get_datasets():
+    """
+    Retrieves a list of all uploaded datasets to be displayed in the UI.
+    It returns the user-defined name for display and the unique
+    dataset_id for querying.
+    """
     try:
         with engine.connect() as conn:
             result = conn.execute(
                 text("SELECT dataset_id, user_defined_name, schema_name "
-                     "FROM dataset_metadata")
+                     "FROM dataset_metadata ORDER BY "
+                     "created_at DESC")
             )
             datasets = [
                 {

@@ -22,7 +22,6 @@ async def upload_zip(
     try:
         user_defined_name = user_defined_name.strip()
 
-        # ✅ Validate inputs
         if not all([file, file.filename.endswith(".zip"),
                     catalog, user_defined_name]):
             return UniformResponse(
