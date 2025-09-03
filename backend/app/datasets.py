@@ -1,8 +1,10 @@
-from typing import List
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
 from sqlalchemy import text
+from fastapi import APIRouter
 from .config import engine
+from .utils import UniformResponse
+from typing import List
+from pydantic import BaseModel
+
 
 router = APIRouter()
 
@@ -13,7 +15,7 @@ class DatasetInfo(BaseModel):
 
 
 @router.get("/datasets", response_model=List[DatasetInfo], tags=["Datasets"])
-async def get_all_datasets():
+async def get_datasets():
     """
     Retrieves a list of all uploaded datasets to be displayed in the UI.
     It returns the user-defined name for display and the unique
@@ -21,17 +23,32 @@ async def get_all_datasets():
     """
     try:
         with engine.connect() as conn:
-            result = conn.execute(text(
-                "SELECT dataset_id, user_defined_name FROM dataset_metadata "
-                "ORDER BY created_at DESC"
-            )).fetchall()
-
+            result = conn.execute(
+                text("SELECT dataset_id, user_defined_name, schema_name "
+                     "FROM dataset_metadata ORDER BY "
+                     "created_at DESC")
+            )
             datasets = [
-                {"dataset_id": row[0],
-                 "user_defined_name": row[1]} for row in result
+                {
+                    "id": row.dataset_id,
+                    "name": row.user_defined_name,
+                    "schema": row.schema_name
+                }
+                for row in result
             ]
-            return datasets
+
+        return UniformResponse(
+            data=datasets if datasets else [],
+            status=200,
+            message="Datasets fetched successfully." if datasets else
+                    "No datasets available.",
+            data_status="success"
+        )
+
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"An error occurred while fetching datasets: {str(e)}")
+        return UniformResponse(
+            error={"code": "INTERNAL_SERVER_ERROR", "details": [str(e)]},
+            status=500,
+            message="An unexpected error occurred while fetching datasets.",
+            data_status="failure"
+        )

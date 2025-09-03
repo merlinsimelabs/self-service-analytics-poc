@@ -5,8 +5,22 @@ from sqlalchemy import text
 from openai import OpenAI
 
 
+from fastapi.responses import JSONResponse
+
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+
+class UniformResponse(JSONResponse):
+    def __init__(self, data=None, error=None, status=200, message="",
+                 data_status="success"):
+        content = {
+            "status": status,
+            "data_status": data_status,
+            "message": message,
+            "data": data if data is not None else {},
+            "error": error if error is not None else {}
+        }
+        super().__init__(status_code=status, content=content)
 
 
 def save_schema_metadata(
@@ -135,12 +149,26 @@ def get_sql_from_llm(metadata: dict, schema_name: str, question: str) -> str:
 
     IMPORTANT RULES:
     - ALWAYS qualify table names with the schema name: `{schema_name}`.
-    - If you need to perform date/time ops on a text column, CAST it explicitly.
-    - If aggregation + window function is needed, use a CTE.
-    - Respond ONLY with the raw SQL query.
+      For example: `SELECT * FROM {schema_name}.orders;`.
+    - If you need to perform date or time operations (like DATE_TRUNC, EXTRACT,
+      or using INTERVAL) on a column that is of type 'object' or 'text' in the
+      schema, you MUST explicitly cast it to a date or timestamp. For example,
+      use `o.order_date::date` or `CAST(o.order_date AS DATE)`.
+    - When a query requires both aggregation (like `SUM`, `AVG` with a
+      `GROUP BY`) and a window function (`OVER (...)`), you MUST use a
+      Common Table Expression (CTE). First, create a CTE that performs the
+      aggregation. Then, select from the CTE and apply the window function to
+      the aggregated column. For example: `WITH daily_sales AS (SELECT date,
+      SUM(amount) as total_sales FROM sales GROUP BY date) SELECT date,
+      AVG(total_sales) OVER (...) FROM daily_sales;`
+    - When combining results from multiple SELECT statements:
+      * Use **UNION** if you need to eliminate duplicates across result sets.
+      * Use **UNION ALL** if you need to keep duplicates (better performance).
+      * Choose based on the semantics of the question.
+    - Your response must be ONLY the raw SQL query, with no additional text,
+      explanations, or markdown.
     """
 
-    print("Calling LLM for SQL...")
     try:
         llm_response = client.chat.completions.create(
             model="gpt-4o-mini",
