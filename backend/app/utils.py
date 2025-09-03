@@ -9,25 +9,33 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 
-def save_schema_metadata(engine, dataset_id, schema_name, metadata):
-    """Store schema metadata for later use in LLM prompts."""
+def save_schema_metadata(
+        conn, dataset_id, user_id, user_defined_name, schema_name, metadata):
+    """Store the complete dataset metadata in the catalog using a
+    provided transaction."""
     metadata_json = json.dumps(metadata)
 
-    with engine.connect() as conn:
-        stmt = text("""
-            INSERT INTO dataset_metadata
-            (dataset_id, schema_name, table_metadata)
-            VALUES (:dataset_id, :schema_name, :table_metadata)
-            ON CONFLICT (dataset_id) DO UPDATE SET
-            schema_name = EXCLUDED.schema_name,
-            table_metadata = EXCLUDED.table_metadata;
-        """)
-        conn.execute(stmt, {
-            "dataset_id": dataset_id,
-            "schema_name": schema_name,
-            "table_metadata": metadata_json
-        })
-        conn.commit()
+    stmt = text("""
+        INSERT INTO dataset_metadata(
+                dataset_id,
+                user_id,
+                user_defined_name,
+                schema_name,
+                table_metadata
+                )VALUES (
+                :dataset_id,
+                :user_id,
+                :user_defined_name,
+                :schema_name,
+                :table_metadata)
+    """)
+    conn.execute(stmt, {
+        "dataset_id": dataset_id,
+        "user_id": user_id,
+        "user_defined_name": user_defined_name,
+        "schema_name": schema_name,
+        "table_metadata": metadata_json
+    })
 
 
 
@@ -38,6 +46,7 @@ def get_schema_from_llm(tables_dfs: dict, user_catalog: str):
     """
     prompt_context = "I have a dataset with the following tables:\n\n"
 
+    prompt_context = "I have a dataset with the following tables:\n\n"
     for table_name, df in tables_dfs.items():
         prompt_context += f"Table: {table_name}\nColumns:\n"
         for col in df.columns:
@@ -113,11 +122,15 @@ def get_schema_from_llm(tables_dfs: dict, user_catalog: str):
 def get_sql_from_llm(metadata: dict, schema_name: str, question: str) -> str:
     """Generates a SQL query using the LLM based on schema and question."""
     system_prompt = f"""
-    You are an expert PostgreSQL query generator. Given the database schema
-    below and a user question, write a single, syntactically correct
-    PostgreSQL query that answers the question.
+    You are an expert PostgreSQL query generator. 
+    Your task is to produce a **single, correct SQL query** that answers the user's question. 
 
-    Database Schema (in JSON format):
+    Inputs you must consider:
+    1. Database schema (in JSON form, provided below).
+    2. User's natural language question.
+    
+
+    Database Schema:
     {json.dumps(metadata, indent=2)}
 
     IMPORTANT RULES:
