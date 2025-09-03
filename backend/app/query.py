@@ -1,96 +1,102 @@
 import json
+import logging
 import pandas as pd
-from typing import List, Dict, Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from .config import engine
 from .utils import get_sql_from_llm, get_chart_suggestion_from_llm
 
+
 router = APIRouter()
 
 
-
 class QueryRequest(BaseModel):
-    dataset_id: str = Field(..., description="The unique ID of the dataset to query.")
-    question: str = Field(..., description="The natural language question from the user.")
-
-
-
-class ChartSuggestionItem(BaseModel):
-    chart_type: str
-    config: Dict[str, Any]   # ✅ allow any JSON type
-
-
-class ChartSuggestion(BaseModel):
-    title: str
-    charts: List[ChartSuggestionItem]
-
-
-
-class QueryResponse(BaseModel):
     dataset_id: str
-    sql_query: str
-    chart_suggestion: ChartSuggestion
-    results: List[Dict[str, Any]]
+    question: str
+   # catalog: Optional[str] = None # Keep this commented out if you don't want to pass it
 
 
-
-@router.post("/query", response_model=QueryResponse, tags=["Query"])
-async def run_query(request: QueryRequest) -> QueryResponse:
+@router.post("/query", tags=["Query"])
+async def run_query(request: QueryRequest):
     """
     Takes a natural language question and a dataset_id,
     generates and executes a SQL query,
-    and returns the results along with a chart suggestion.
+    and returns results along with a chart suggestion.
     """
+    logging.info(f"Received query request for dataset_id: {request.dataset_id}")
+
     try:
         with engine.connect() as conn:
-            # fetch dataset metadata
-            result = conn.execute(
-                text(
-                    "SELECT schema_name, table_metadata FROM dataset_metadata "
-                    "WHERE dataset_id = :id"
-                ),
-                {"id": request.dataset_id},
-            ).fetchone()
+
+            logging.info("Fetching schema metadata from database...")
+            stmt = text(
+                "SELECT schema_name, table_metadata FROM dataset_metadata WHERE dataset_id = :id"
+            )
+            result = conn.execute(stmt, {"id": request.dataset_id}).fetchone()
 
             if not result:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Dataset with ID '{request.dataset_id}' not found",
-                )
+                logging.warning(f"Dataset with ID '{request.dataset_id}' not found.")
+                raise HTTPException(status_code=404, detail=f"Dataset with ID '{request.dataset_id}' not found.")
 
             schema_name, metadata = result
-            metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
 
-            # generate SQL from LLM
+            metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+            logging.info(f"Successfully fetched metadata for schema: {schema_name}")
+
+
+            # --- CHANGE IS HERE ---
+            # Remove request.catalog as it's not part of QueryRequest and you don't want to pass it.
             sql_query = get_sql_from_llm(metadata, schema_name, request.question)
 
-            # run query
-            results_df = pd.read_sql(text(sql_query), conn)
 
-            # get chart suggestion
+            logging.info(f"Generated SQL Query:\n{sql_query}")
+
+            logging.info("Executing SQL query against the database...")
+            results_df = pd.read_sql(text(sql_query), conn)
+            # logging.info(f"Query executed successfully, {len(results_df)} rows returned.")
+
+
+            # chart_suggestion_dict = get_chart_suggestion_from_llm(
+            #     request.question, results_df
+            # )
+            logging.info(f"Query executed successfully, {len(results_df)} rows returned.")
+
+            # Replace NaN/Infinity with None so JSON serialization works
+            results_df = results_df.where(pd.notnull(results_df), None)
+
             chart_suggestion_dict = get_chart_suggestion_from_llm(
-                request.question, results_df
-            )
+            request.question, results_df
+                )
+
+
+        return {
+            "status": 200,
+            "data_status": "success",
+            "message": "Query executed successfully.",
+            "data": {
+                "dataset_id": request.dataset_id,
+                "sql_query": sql_query,
+                "chart_suggestion": chart_suggestion_dict,
+                "results": results_df.to_dict(orient="records"),
+            }
+        }
 
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+        logging.error(f"ValueError during query execution: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+    except SQLAlchemyError as e:
+
+        logging.error(f"Database error during query execution: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"A database error occurred: {e}")
+
     except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"An error occurred during query execution: {str(e)}",
-        )
 
-    
-    response_data = QueryResponse(
-        dataset_id=request.dataset_id,
-        sql_query=sql_query,
-        chart_suggestion=ChartSuggestion(**chart_suggestion_dict),
-        results=results_df.to_dict(orient="records"),
-    )
-    print("Backend Response:", response_data.json())
-
-    return response_data
+        logging.error(f"An unexpected error occurred: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected internal error occurred: {e}")

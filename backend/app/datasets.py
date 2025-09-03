@@ -26,15 +26,12 @@ async def get_all_datasets():
                 "ORDER BY created_at DESC"
             )).fetchall()
 
-            # Convert the list of database rows into a list of dictionaries
-            # that matches our DatasetInfo model
             datasets = [
                 {"dataset_id": row[0],
                  "user_defined_name": row[1]} for row in result
             ]
             return datasets
     except Exception as e:
-        # If anything goes wrong, return a server error
         raise HTTPException(
             status_code=500,
             detail=f"An error occurred while fetching datasets: {str(e)}")
