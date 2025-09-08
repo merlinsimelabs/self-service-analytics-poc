@@ -3,14 +3,20 @@ import os
 import pandas as pd
 from sqlalchemy import text
 from openai import OpenAI
-
+import logging 
 
 from fastapi.responses import JSONResponse
+
+#initializing logger
+logger = logging.getLogger(__name__)
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 class UniformResponse(JSONResponse):
+    """
+    Custom JSON response class for consistent API response structure.
+    """
     def __init__(self, data=None, error=None, status=200, message="",
                  data_status="success"):
         content = {
@@ -25,8 +31,9 @@ class UniformResponse(JSONResponse):
 
 def save_schema_metadata(
         conn, dataset_id, user_id, user_defined_name, schema_name, metadata):
-    """Store the complete dataset metadata in the catalog using a
-    provided transaction."""
+    """
+    Store the complete dataset metadata in the catalog using a provided transaction.
+    """
     metadata_json = json.dumps(metadata)
 
     stmt = text("""
@@ -50,7 +57,7 @@ def save_schema_metadata(
         "schema_name": schema_name,
         "table_metadata": metadata_json
     })
-
+    logger.info(f"Metadata saved for dataset_id: {dataset_id}")
 
 
 def get_schema_from_llm(tables_dfs: dict, user_catalog: str):
@@ -59,14 +66,16 @@ def get_schema_from_llm(tables_dfs: dict, user_catalog: str):
     based on table structure, data samples, and a user-provided catalog.
     """
     prompt_context = "I have a dataset with the following tables:\n\n"
-
-    prompt_context = "I have a dataset with the following tables:\n\n"
     for table_name, df in tables_dfs.items():
         prompt_context += f"Table: {table_name}\nColumns:\n"
         for col in df.columns:
             dtype = str(df[col].dtype)
             sample_data = df[col].dropna().head(3).tolist()
-            prompt_context += f"- {col} (type: {dtype}, sample_data: {sample_data})\n"
+            sample_data_cleaned = [
+                str(x) if isinstance(x, (pd.Timestamp, pd.Timedelta)) else x
+                for x in sample_data
+            ]
+            prompt_context += f"- {col} (type: {dtype}, sample_data: {sample_data_cleaned})\n"
         prompt_context += "\n"
 
     system_prompt = f"""
@@ -113,24 +122,23 @@ def get_schema_from_llm(tables_dfs: dict, user_catalog: str):
       ]
     }}
     """
-
-    print(" Calling LLM for schema...")
+    logger.debug(f"Schema LLM system prompt:\n{system_prompt}")
+    logger.info("Calling LLM for schema inference...")
     try:
         llm_response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "system", "content": system_prompt}],
             temperature=0.1,
-          
             response_format={"type": "json_object"},
         )
 
         response_content = llm_response.choices[0].message.content
+        logger.debug(f"Raw LLM schema response:\n{response_content}")
         return json.loads(response_content)
 
     except Exception as e:
-        print(f"Schema LLM failed: {e}")
-        raise ValueError("Failed to generate a valid schema from LLM.")
-
+        logger.error(f"Schema LLM failed: {e}", exc_info=True)
+        raise ValueError(f"Failed to generate a valid schema from LLM. Error: {e}")
 
 
 def get_sql_from_llm(metadata: dict, schema_name: str, question: str) -> str:
@@ -168,7 +176,8 @@ def get_sql_from_llm(metadata: dict, schema_name: str, question: str) -> str:
     - Your response must be ONLY the raw SQL query, with no additional text,
       explanations, or markdown.
     """
-
+    logger.debug(f"SQL LLM system prompt:\n{system_prompt}\nUser question: {question}")
+    logger.info("Calling LLM to generate SQL query...")
     try:
         llm_response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -177,25 +186,23 @@ def get_sql_from_llm(metadata: dict, schema_name: str, question: str) -> str:
                 {"role": "user", "content": question}
             ],
             temperature=0,
-            
         )
         sql_query = (
             llm_response.choices[0].message.content.strip()
             .replace("`", "").replace("sql", "")
         )
-        print(f"SQL generated: {sql_query}")
+        logger.info(f"SQL generated: {sql_query}")
         return sql_query
 
     except Exception as e:
-        print(f"SQL LLM failed: {e}")
+        logger.error(f"SQL LLM failed: {e}", exc_info=True)
         raise ValueError(f"Failed to generate SQL from LLM. Error: {e}")
-
-
 
 def get_chart_suggestion_from_llm(question: str, df: pd.DataFrame) -> dict:
     """Generates chart suggestions suitable for ApexCharts, ranked by aptness."""
+  
     system_prompt = """
-You are a data visualization expert specializing in ApexCharts.
+You are a data visualization expert specializing in ApexCharts. Your goal is to suggest the MOST SUITABLE and DIVERSE ApexCharts based on the user's question and the provided data, strongly prioritizing visual charts over tables.
 
 STRICT RULES for chart suggestions:
 1. Always return a single valid JSON object with:
@@ -206,34 +213,66 @@ STRICT RULES for chart suggestions:
    - "chart_type": one of ['line','area','bar','histogram','pie','donut',
      'radialBar','scatter','bubble','heatmap','treemap','candlestick','boxPlot',
      'radar','polarArea','rangeBar','table']
-   - "config": mapping of dataset columns:
-       - bar/line/area: { "x": "column_name", "series": [{"name": "metric1", "y": "column_name"}, {"name": "metric2", "y": "column_name"}, ...] }
-       - pie/donut/polarArea: { "labels": ["top N categories", "Other"], "values": ["top N metric values", "remaining value"] }
-       - scatter/bubble: { "x": "column_name", "y": ["metric1", "metric2", ...], "size": "column_name" }  # allow multiple y-metrics
-       - heatmap/treemap: { "x": "column_name", "y": "column_name", "values": ["metric1", "metric2", ...] }  # allow multiple metrics
-       - table: { "columns": ["col1","col2",...] }
+   - "config": mapping of dataset columns according to ApexCharts requirements:
+       - **For Trend/Time-Series (e.g., "sales over time"):** 'line', 'area' -> { "x": "date_column", "series": [{"name": "Metric", "y": "value_column"}] }
+       - **For Comparison/Ranking (e.g., "top 5 products", "sales by region"):** 'bar' -> { "x": "category_column", "series": [{"name": "Metric", "y": "value_column"}] }
+       - **For Composition/Proportion (e.g., "market share", "revenue breakdown"):** 'pie', 'donut', 'polarArea' -> { "labels": ["category1", "category2", ...], "values": ["value1", "value2", ...] }
+       - **For Distribution (e.g., "frequency of ages"):** 'histogram' -> { "x": "numerical_column", "series": [{"name": "Count", "y": "count_column"}] }
+       - **For Relationship/Correlation (e.g., "price vs demand"):** 'scatter', 'bubble' -> { "x": "metric1", "y": ["metric2"], "size": "metric3_optional" }
+       - **For Hierarchical/Categorical Data with multiple metrics:** 'heatmap', 'treemap' -> { "x": "category1", "y": "category2", "values": ["metric1", "metric2"] }
+       - **Only as a LAST RESORT if no other visual chart is suitable:** 'table' -> { "columns": ["col1","col2",...] }
 
-3. If the user query mentions "top N" (e.g., top 10 customers):
-   - Charts should include only top N.
-   - For pie/donut/polarArea, include an additional "Other" slice to represent remaining data.
-4. - Suggest both 'pie' and 'donut' as separate charts even if the configuration is similar.
-5. - Each chart object must have its own 'chart_type' and 'config'.
-6. Suggest **multiple chart types (≥2)** covering all suitable charts, not just bar.
+3. **PRIORITIZATION:**
+   - **Strongly prefer visual charts (line, bar, pie, scatter, etc.) over 'table'.**
+   - **Only suggest 'table' if the data is genuinely unstructured, too diverse, or too detailed for a meaningful visual representation.**
+   - If a visual chart is applicable, **DO NOT** make 'table' the primary or only suggestion unless explicitly requested or if all other visual charts are completely unsuitable.
 
-7. If the dataset is unsuitable for charts, return only "table" with relevant columns.
+4. If the user query mentions "top N" (e.g., top 10 customers):
+   - Visual charts should include only the top N.
+   - For 'pie', 'donut', 'polarArea', always include an additional "Other" slice to represent remaining data if applicable.
 
-8. The JSON must be strictly valid, parseable, and contain no reasoning, explanations, or extra fields.
+5. Suggest **multiple, distinct chart types (minimum 2, up to 4 if highly relevant)** that provide different perspectives on the data. For example, if both a bar chart and a pie chart are good for comparison, suggest both. If a trend is present, include a line or area chart.
+
+6. Ensure **each chart object has its own 'chart_type' and a correctly structured 'config'** mapping columns from the provided data preview.
+
+7. The JSON must be strictly valid, parseable, and contain no reasoning, explanations, or extra fields.
 """
+    
+
+    if df.empty:
+        logger.warning("Empty DataFrame received for chart suggestion. Suggesting a table chart.")
+        return {
+            "title": question,
+            "charts": [{"chart_type": "table", "config": {"columns": []}}]
+        }
+
+    data_preview_list = []
+    try:
+        temp_df_for_preview = df.head(5).copy()
+        for col in temp_df_for_preview.columns:
+            if not pd.api.types.is_numeric_dtype(temp_df_for_preview[col]) and \
+               not pd.api.types.is_datetime64_any_dtype(temp_df_for_preview[col]) and \
+               not pd.api.types.is_bool_dtype(temp_df_for_preview[col]):
+                temp_df_for_preview[col] = temp_df_for_preview[col].apply(lambda x: str(x)[:100] if pd.notna(x) else None)
+            else:
+                temp_df_for_preview[col] = temp_df_for_preview[col].apply(lambda x: x.isoformat() if isinstance(x, pd.Timestamp) else x)
+
+        data_preview_list = temp_df_for_preview.to_dict(orient='records')
+    except Exception as e:
+        logger.error(f"Error preparing data_preview_list: {e}", exc_info=True)
+        data_preview_list = []
+        logger.warning("Proceeding with empty data_preview_list due to error during preparation.")
 
 
     user_prompt = f"""
     User's original question: "{question}"
     Available data columns: {list(df.columns)}
-    Data preview (first 5 rows):
-    {df.head().to_string()}
+    Data preview (first 5 rows, as JSON):
+    {json.dumps(data_preview_list, indent=2)}
     """
+    logger.debug(f"User prompt for chart LLM:\n{user_prompt}")
 
-    print("Calling LLM for chart suggestion...")
+    logger.info("Calling LLM for chart suggestion...")
     try:
         llm_response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -241,17 +280,26 @@ STRICT RULES for chart suggestions:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0,
-            
+            temperature=0.3, 
             response_format={"type": "json_object"}
         )
 
         content = llm_response.choices[0].message.content
+        logger.debug(f"Raw LLM chart suggestion response (length {len(content) if content else 0}):\n{content[:2000]}...")
+
         return json.loads(content)
 
+    except json.JSONDecodeError as e:
+        full_content_log = content if 'content' in locals() else "Content not captured."
+        logger.error(f"Chart LLM response was not valid JSON: {e}. Raw content (full):\n{full_content_log}", exc_info=True)
+        return {
+            "title": question,
+            "charts": [
+                {"chart_type": "table", "config": {"columns": list(df.columns)}}
+            ]
+        }
     except Exception as e:
-        print(f"Chart LLM failed: {e}")
-        # fallback = simple table suggestion
+        logger.error(f"Chart LLM failed unexpectedly (check API key/network): {e}", exc_info=True)
         return {
             "title": question,
             "charts": [
