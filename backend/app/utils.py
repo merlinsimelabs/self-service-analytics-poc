@@ -151,34 +151,46 @@ def get_sql_from_llm(metadata: dict, schema_name: str, question: str) -> str:
     """Generates a SQL query using the LLM based on schema and question."""
 
     system_prompt = f"""
-    You are an expert PostgreSQL query generator. Given the database schema
-    below and a user question, write a single, syntactically correct
+    You are an expert PostgreSQL query generator. 
+    Given the database schema and user question, write a single, syntactically correct
     PostgreSQL query that answers the question.
 
-    Database Schema (in JSON format):
+    Database Schema / Catalog (in JSON format):
     {json.dumps(metadata, indent=2)}
 
     IMPORTANT RULES:
     - ALWAYS qualify table names with the schema name: `{schema_name}`.
       For example: `SELECT * FROM {schema_name}.orders;`.
+    - Use the provided schema/catalog as the ONLY source of truth for available tables, columns,
+      datatypes, and relationships. Do not assume extra fields or tables.
     - If you need to perform date or time operations (like DATE_TRUNC, EXTRACT,
       or using INTERVAL) on a column that is of type 'object' or 'text' in the
-      schema, you MUST explicitly cast it to a date or timestamp. For example,
-      use `o.order_date::date` or `CAST(o.order_date AS DATE)`.
-    - When a query requires both aggregation (like `SUM`, `AVG` with a
-      `GROUP BY`) and a window function (`OVER (...)`), you MUST use a
-      Common Table Expression (CTE). First, create a CTE that performs the
-      aggregation. Then, select from the CTE and apply the window function to
-      the aggregated column. For example: `WITH daily_sales AS (SELECT date,
-      SUM(amount) as total_sales FROM sales GROUP BY date) SELECT date,
-      AVG(total_sales) OVER (...) FROM daily_sales;`
+      schema, you MUST explicitly cast it to a date or timestamp. 
+      Example: `o.order_date::date` or `CAST(o.order_date AS DATE)`.
+    - When a query requires both aggregation (like SUM, AVG with a GROUP BY) 
+      and a window function (OVER (...)), you MUST use a Common Table Expression (CTE). 
+      First create a CTE that performs the aggregation, then select from the CTE 
+      and apply the window function to the aggregated column.
+      Example:
+        WITH daily_sales AS (
+            SELECT date, SUM(amount) as total_sales
+            FROM sales
+            GROUP BY date
+        )
+        SELECT date, AVG(total_sales) OVER (...)
+        FROM daily_sales;
     - When combining results from multiple SELECT statements:
-      * Use **UNION** if you need to eliminate duplicates across result sets.
-      * Use **UNION ALL** if you need to keep duplicates (better performance).
-      * Choose based on the semantics of the question.
-    - Your response must be ONLY the raw SQL query, with no additional text,
-      explanations, or markdown.
+      * Use UNION if you need to eliminate duplicates across result sets.
+      * Use UNION ALL if you need to keep duplicates (better performance).
+      * Choose based on the semantics of the user question.
+    - When comparing one row’s result to another (e.g. difference from previous customer), 
+      use window functions like LAG() or LEAD() with ORDER BY.
+    - Always ensure that aggregations happen at the correct entity level 
+      (e.g., per customer, per order, per account) as implied by the question.
+    - Do not include any explanation, markdown, or commentary in your response. 
+      Output ONLY the raw SQL query.
     """
+
 
     try:
         llm_response = client.chat.completions.create(
@@ -201,22 +213,88 @@ def get_sql_from_llm(metadata: dict, schema_name: str, question: str) -> str:
 
 
 def get_chart_suggestion_from_llm(question: str, df: pd.DataFrame) -> dict:
-    """Generates a chart suggestion based on the query result."""
-
-    system_prompt = """
-    You are a data visualization expert. Given a user's question and the
-    columns of the resulting dataset, suggest the most appropriate chart type.
-    Your response must be a single JSON object with two keys: "chart_type" and
-    "reasoning".Available chart types are: 'bar', 'line', 'pie', 'scatter',
-    'table'.Choose 'table' if the data is not suitable for a chart or is best
-    displayed as a list.
+    """
+    Generates a chart suggestion (type and config) based on the query result
+    and the user's original question.
+    The chart_config includes suggested column mappings for the chart.
     """
 
-    user_prompt = f"""
+    # Identify column types for better LLM hints
+    column_info = []
+    for col in df.columns:
+        dtype = str(df[col].dtype)
+        is_numeric = pd.api.types.is_numeric_dtype(df[col])
+        is_datetime = pd.api.types.is_datetime64_any_dtype(df[col])
+        # Simple heuristic for categorical: not numeric and few unique values
+        is_categorical = not is_numeric and df[col].nunique() < min(len(df), 20)
+
+        column_info.append({
+            "name": col,
+            "type": dtype,
+            "is_numeric": is_numeric,
+            "is_datetime": is_datetime,
+            "is_categorical": is_categorical,
+            "unique_values": df[col].nunique() # Useful for cardinality
+        })
+
+    system_prompt = f"""
+    You are a data visualization expert. Given a user's question, the columns of the
+    resulting dataset, and their types, suggest the most appropriate chart type
+    and a default configuration for it.
+
+    Your response must be a single JSON object with two keys:
+    "chart_type": The suggested chart type ('bar', 'line', 'pie', 'scatter', 'table', 'area').
+    "reasoning": A brief explanation for the chart choice.
+    "chart_config": A JSON object containing specific configuration for the chart,
+                    especially column mappings.
+
+    Available chart types and their primary configurations:
+    - 'bar': For comparing categories. Needs 'x_column' (category) and 'y_column' (measure).
+    - 'line': For showing trends over time or ordered categories. Needs 'x_column' (time/order) and 'y_column' (measure).
+    - 'area': Similar to line, for showing magnitude of change over time. Needs 'x_column' (time/order) and 'y_column' (measure).
+    - 'pie': For showing proportions of a whole. Needs 'label_column' (category) and 'value_column' (measure).
+    - 'scatter': For showing relationships between two numerical variables. Needs 'x_column' (measure) and 'y_column' (measure).
+    - 'table': If the data is not suitable for a graphical chart or is best displayed as raw numbers. No specific column mappings needed for 'table'.
+
+    Consider these rules for column mapping:
+    - For 'x_column'/'y_column' in bar/line/area/scatter: Prioritize numerical columns for measures, and categorical/datetime for categories/time.
+    - For 'pie' chart: 'value_column' must be numerical. 'label_column' should be categorical and have a reasonable number of unique values (e.g., less than 15-20)
+    - If no obvious columns fit a chart type, or if there are too many columns for a simple chart (e.g., more than 2-3 main columns for visualization), default to 'table'.
+    - Ensure the suggested columns actually exist in the provided 'Resulting data columns'.
+
     User's original question: "{question}"
-    Resulting data columns: {list(df.columns)}
+
+    Resulting data columns and their properties:
+    {json.dumps(column_info, indent=2)}
+
     Data preview (first 5 rows):
     {df.head().to_string()}
+
+    Please respond with ONLY a single, valid JSON object.
+    Example for a bar chart:
+    {{
+      "chart_type": "bar",
+      "reasoning": "Bar chart is suitable for comparing sales across different product categories.",
+      "chart_config": {{
+        "x_column": "product_category",
+        "y_column": "total_sales"
+      }}
+    }}
+    Example for a pie chart:
+    {{
+      "chart_type": "pie",
+      "reasoning": "Pie chart effectively shows the distribution of market share by region.",
+      "chart_config": {{
+        "label_column": "region",
+        "value_column": "market_share_percentage"
+      }}
+    }}
+    Example for a table:
+    {{
+      "chart_type": "table",
+      "reasoning": "The data is tabular and best viewed directly as a list of detailed records.",
+      "chart_config": {{}}
+    }}
     """
 
     try:
@@ -224,12 +302,31 @@ def get_chart_suggestion_from_llm(question: str, df: pd.DataFrame) -> dict:
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": f"Given the question: '{question}' and data with columns {list(df.columns)}, suggest a chart type and configuration."}
             ],
             temperature=0,
             response_format={"type": "json_object"}
         )
-        return json.loads(llm_response.choices[0].message.content)
+        response_content = llm_response.choices[0].message.content
+        chart_suggestion = json.loads(response_content)
+
+        # The 'data' field might be large, consider if you want to store it here
+        # or have the frontend re-fetch based on sql_query and dataset_id.
+        # For this PoC, storing it directly in chart_config is simpler for the frontend.
+        chart_suggestion['chart_config']['data'] = df.to_dict(orient="records")
+        chart_suggestion['chart_config']['columns'] = list(df.columns)
+        chart_suggestion['chart_config']['original_question'] = question
+        
+        return chart_suggestion
     except Exception as e:
-        raise ValueError("Failed to generate chart suggestion from LLM."
-                         f" Error: {e}")
+        print(f"Error generating chart suggestion from LLM: {e}")
+        # Fallback to a default table suggestion if LLM fails
+        return {
+            "chart_type": "table",
+            "reasoning": "Failed to generate a chart suggestion. Displaying as table.",
+            "chart_config": {
+                "data": df.to_dict(orient="records"),
+                "columns": list(df.columns),
+                "original_question": question
+            }
+        }
