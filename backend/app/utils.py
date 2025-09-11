@@ -202,42 +202,97 @@ def get_chart_suggestion_from_llm(question: str, df: pd.DataFrame) -> dict:
     """Generates chart suggestions suitable for ApexCharts, ranked by aptness."""
   
     system_prompt = """
-You are a data visualization expert specializing in ApexCharts. Your goal is to suggest the MOST SUITABLE and DIVERSE ApexCharts based on the user's question and the provided data, strongly prioritizing visual charts over tables.
+You are an expert in data visualization using ApexCharts. 
+Your task is to ALWAYS output a single, strictly valid JSON object that suggests ALL suitable chart types for the given dataset and query.
 
-STRICT RULES for chart suggestions:
-1. Always return a single valid JSON object with:
-   - "title": the exact user query from the user
-   - "charts": a list of chart objects
+### 1. Output Format
+- JSON must contain:
+  - "title": repeat exactly the user query
+  - "charts": list of chart objects
 
-2. Each chart object must include:
-   - "chart_type": one of ['line','area','bar','histogram','pie','donut',
-     'radialBar','scatter','bubble','heatmap','treemap','candlestick','boxPlot',
-     'radar','polarArea','rangeBar','table']
-   - "config": mapping of dataset columns according to ApexCharts requirements:
-       - **For Trend/Time-Series (e.g., "sales over time"):** 'line', 'area' -> { "x": "date_column", "series": [{"name": "Metric", "y": "value_column"}] }
-       - **For Comparison/Ranking (e.g., "top 5 products", "sales by region"):** 'bar' -> { "x": "category_column", "series": [{"name": "Metric", "y": "value_column"}] }
-       - **For Composition/Proportion (e.g., "market share", "revenue breakdown"):** 'pie', 'donut', 'polarArea' -> { "labels": ["category1", "category2", ...], "values": ["value1", "value2", ...] }
-       - **For Distribution (e.g., "frequency of ages"):** 'histogram' -> { "x": "numerical_column", "series": [{"name": "Count", "y": "count_column"}] }
-       - **For Relationship/Correlation (e.g., "price vs demand"):** 'scatter', 'bubble' -> { "x": "metric1", "y": ["metric2"], "size": "metric3_optional" }
-       - **For Hierarchical/Categorical Data with multiple metrics:** 'heatmap', 'treemap' -> { "x": "category1", "y": "category2", "values": ["metric1", "metric2"] }
-       - **Only as a LAST RESORT if no other visual chart is suitable:** 'table' -> { "columns": ["col1","col2",...] }
+Each chart object must include:
+- "chart_type": one of ['line','area','bar','histogram','pie','donut','radialBar','scatter','bubble','heatmap','treemap','candlestick','boxPlot','radar','polarArea','rangeBar','table']
+- "config": chart configuration following ApexCharts format
 
-3. **PRIORITIZATION:**
-   - **Strongly prefer visual charts (line, bar, pie, scatter, etc.) over 'table'.**
-   - **Only suggest 'table' if the data is genuinely unstructured, too diverse, or too detailed for a meaningful visual representation.**
-   - If a visual chart is applicable, **DO NOT** make 'table' the primary or only suggestion unless explicitly requested or if all other visual charts are completely unsuitable.
+### 2. Chart Generation Rules
+- Generate ALL logically suitable chart types for the dataset and query.
+- Prefer visual charts; use "table" only if the data is unsuitable for visual representation.
+- Always generate at least 2 charts; maximum 6 for readability.
+- Do not omit any chart type that can reasonably represent the data.
 
-4. If the user query mentions "top N" (e.g., top 10 customers):
-   - Visual charts should include only the top N.
-   - For 'pie', 'donut', 'polarArea', always include an additional "Other" slice to represent remaining data if applicable.
+### 3. Chart Config Rules
 
-5. Suggest **multiple, distinct chart types (minimum 2, up to 4 if highly relevant)** that provide different perspectives on the data. For example, if both a bar chart and a pie chart are good for comparison, suggest both. If a trend is present, include a line or area chart.
+- Trend/Time-Series: 'line','area' → 
+  {
+    "x":"date_col",
+    "series":[{"name":"Metric","y":"value_col"}],
+    "markers":{"size":5}
+  }
+  * Markers must be included to show each point with hover labels and exact values.
 
-6. Ensure **each chart object has its own 'chart_type' and a correctly structured 'config'** mapping columns from the provided data preview.
+- Comparison/Ranking: 'bar','radar' → 
+  {
+    "x":"category_col",
+    "series":[{"name":"Metric","y":"value_col"}]
+  }
 
-7. The JSON must be strictly valid, parseable, and contain no reasoning, explanations, or extra fields.
+- Composition/Proportion: 'pie','donut','polarArea','radialBar' → 
+  {
+    "labels":["cat1","cat2",...],
+    "values":[val1,val2,...]
+  }
+  RULES:
+    * Only suggest these chart types if the query requests top N categories AND N ≤ 5.
+    * Always use **all top N rows returned by the query** for labels and values; do **not** truncate or limit.
+    * Aggregate any remaining rows beyond top N into a single "Other" slice.
+    * "Other" value = SUM of all remaining rows; must **never** be 0 unless there are truly no remaining rows.
+    * If there are no remaining rows, omit "Other".
+    * Total slices = top N + 1 ("Other") if applicable; must **never exceed 6 slices**.
+    * NEVER skip, truncate, or use arbitrary defaults for labels or values.
+
+- Distribution: 'histogram','boxPlot' → 
+  {
+    "x":"num_col",
+    "series":[{"name":"Count","y":"count_col"}]
+  }
+
+- Relationship: 'scatter','bubble' → 
+  {
+    "x":"metric1",
+    "y":"metric2",
+    "size":"metric3_optional"
+  }
+
+- Hierarchical/Matrix: 'heatmap','treemap' → 
+  {
+    "x":"cat1",
+    "y":"cat2",
+    "values":[...]
+  }
+
+- Range/Stock: 'rangeBar','candlestick' → 
+  {
+    "x":"date_or_cat",
+    "series":[{"name":"Metric","y":["low","high"]}]
+  }
+
+- Table (last resort): 'table' → 
+  {
+    "columns":["col1","col2",...]
+  }
+
+### 4. Strict Rules
+- Always return strictly valid JSON only; no explanations, no extra text.
+- Pie/Donut/PolarArea/RadialBar must include **all top N labels and values from the result set**, plus a correctly calculated "Other" slice if there are remaining rows.
+- Only suggest Pie/Donut if top N ≤ 5 and total slices ≤ 6 after including "Other".
+- Always include **all suitable ApexCharts chart types** that can represent the data; do not omit any.
+- NEVER set "Other" = 0 unless there are literally no remaining rows.
+- Numeric values must be **exact sums from the dataset**, never estimated.
+- Line/Area charts must include markers to show individual points with hover labels and exact values.
+- Do not truncate, skip, or limit the number of points, labels, or series under any circumstance.
 """
-    
+
+
 
     if df.empty:
         logger.warning("Empty DataFrame received for chart suggestion. Suggesting a table chart.")

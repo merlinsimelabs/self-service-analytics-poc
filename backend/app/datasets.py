@@ -1,20 +1,21 @@
 from sqlalchemy import text
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from .config import engine
 from .utils import UniformResponse
-from typing import List
-from pydantic import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
+#from typing import List
+#from pydantic import BaseModel
 
 
 router = APIRouter()
 
 
-class DatasetInfo(BaseModel):
-    dataset_id: str
-    user_defined_name: str
+# class DatasetInfo(BaseModel):
+#     dataset_id: str
+#     user_defined_name: str
 
 
-@router.get("/datasets", response_model=List[DatasetInfo], tags=["Datasets"])
+@router.get("/datasets", tags=["Datasets"])
 async def get_datasets():
     """
     Retrieves a list of all uploaded datasets to be displayed in the UI.
@@ -45,10 +46,31 @@ async def get_datasets():
             data_status="success"
         )
 
-    except Exception as e:
+        
+
+    except SQLAlchemyError as e:
+       
         return UniformResponse(
-            error={"code": "INTERNAL_SERVER_ERROR", "details": [str(e)]},
+            error={"code": "DATABASE_ERROR", "details": [str(e)]},
             status=500,
-            message="An unexpected error occurred while fetching datasets.",
+            message="A database error occurred while fetching datasets.",
+            data_status="failure"
+        )
+
+    except HTTPException as e:
+    
+        return UniformResponse(
+            error={"code": "HTTP_ERROR", "details": [e.detail]},
+            status=e.status_code,
+            message=e.detail,
+            data_status="failure"
+        )
+
+    except Exception as e:
+        
+        return UniformResponse(
+            error={"code": e.__class__.__name__.upper(), "details": [str(e)]},
+            status=500,
+            message=f"Unexpected {e.__class__.__name__} occurred.",
             data_status="failure"
         )
