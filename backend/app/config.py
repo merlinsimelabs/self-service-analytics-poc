@@ -15,11 +15,30 @@ with engine.connect() as conn:
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS dataset_metadata (
             dataset_id TEXT PRIMARY KEY,
-            user_id TEXT, -- Placeholder for future multi-user support
-            user_defined_name TEXT UNIQUE NOT NULL, -- The user's unique name
-            schema_name TEXT UNIQUE NOT NULL, -- The internal schema name
-            created_at TIMESTAMPTZ DEFAULT NOW(), -- The time of creation
+            user_id TEXT,
+            user_defined_name TEXT UNIQUE NOT NULL,
+            schema_name TEXT UNIQUE NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
             table_metadata JSONB
+        );
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS dashboards (
+            dashboard_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            dataset_id TEXT REFERENCES dataset_metadata(dataset_id),
+            dashboard_name TEXT NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS dashboard_charts (
+            chart_id TEXT PRIMARY KEY,
+            dashboard_id TEXT REFERENCES dashboards(dashboard_id) ON DELETE CASCADE,
+            chart_type TEXT NOT NULL,
+            sql_query TEXT NOT NULL,
+            chart_config JSONB,
+            created_at TIMESTAMPTZ DEFAULT NOW()
         );
     """))
     conn.commit()
