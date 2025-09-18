@@ -207,77 +207,168 @@ def get_sql_from_llm(metadata: dict, schema_name: str, question: str) -> str:
 
 def get_chart_suggestion_from_llm(question: str, df: pd.DataFrame) -> dict:
     """Generates chart suggestions suitable for ApexCharts, ranked by aptness."""
-  
+
     system_prompt = """
-You are a data visualization expert specializing in ApexCharts. Your goal is to suggest the MOST SUITABLE and DIVERSE ApexCharts based on the user's question and the provided data, strongly prioritizing visual charts over tables.
 
-STRICT RULES for chart suggestions:
-1. Always return a single valid JSON object with:
-   - "title": the exact user query from the user
-   - "charts": a list of chart objects
+You are an expert in data visualization using ApexCharts.
 
-2. Each chart object must include:
-   - "chart_type": one of ['line','area','bar','histogram','pie','donut',
-     'radialBar','scatter','bubble','heatmap','treemap','candlestick','boxPlot',
-     'radar','polarArea','rangeBar','table']
-   - "config": mapping of dataset columns according to ApexCharts requirements:
-       - **For Trend/Time-Series (e.g., "sales over time"):** 'line', 'area' -> { "x": "date_column", "series": [{"name": "Metric", "y": "value_column"}] }
-       - **For Comparison/Ranking (e.g., "top 5 products", "sales by region"):** 'bar' -> { "x": "category_column", "series": [{"name": "Metric", "y": "value_column"}] }
-       - **For Composition/Proportion (e.g., "market share", "revenue breakdown"):** 'pie', 'donut', 'polarArea' -> { "labels": ["category1", "category2", ...], "values": ["value1", "value2", ...] }
-       - **For Distribution (e.g., "frequency of ages"):** 'histogram' -> { "x": "numerical_column", "series": [{"name": "Count", "y": "count_column"}] }
-       - **For Relationship/Correlation (e.g., "price vs demand"):** 'scatter', 'bubble' -> { "x": "metric1", "y": ["metric2"], "size": "metric3_optional" }
-       - **For Hierarchical/Categorical Data with multiple metrics:** 'heatmap', 'treemap' -> { "x": "category1", "y": "category2", "values": ["metric1", "metric2"] }
-       - **Only as a LAST RESORT if no other visual chart is suitable:** 'table' -> { "columns": ["col1","col2",...] }
+Your task is to ALWAYS output a single, strictly valid JSON object that suggests ALL suitable chart types for the given dataset and query.
+ 
+### 1. Output Format
 
-3. **PRIORITIZATION:**
-   - **Strongly prefer visual charts (line, bar, pie, scatter, etc.) over 'table'.**
-   - **Only suggest 'table' if the data is genuinely unstructured, too diverse, or too detailed for a meaningful visual representation.**
-   - If a visual chart is applicable, **DO NOT** make 'table' the primary or only suggestion unless explicitly requested or if all other visual charts are completely unsuitable.
+- JSON must contain:
 
-4. If the user query mentions "top N" (e.g., top 10 customers):
-   - Visual charts should include only the top N.
-   - For 'pie', 'donut', 'polarArea', always include an additional "Other" slice to represent remaining data if applicable.
+  - "title": repeat exactly the user query
 
-5. Suggest **multiple, distinct chart types (minimum 2, up to 4 if highly relevant)** that provide different perspectives on the data. For example, if both a bar chart and a pie chart are good for comparison, suggest both. If a trend is present, include a line or area chart.
+  - "charts": list of chart objects
+ 
+Each chart object must include:
 
-6. Ensure **each chart object has its own 'chart_type' and a correctly structured 'config'** mapping columns from the provided data preview.
+- "chart_type": one of ['line','area','bar','histogram','pie','donut','radialBar','scatter','bubble','heatmap','treemap','candlestick','boxPlot','radar','polarArea','rangeBar','table']
 
-7. The JSON must be strictly valid, parseable, and contain no reasoning, explanations, or extra fields.
+- "config": chart configuration strictly following ApexCharts format
+
+  * Config must include **all details needed by ApexCharts** to directly render the chart.
+
+  * Config must use real column names from the dataset and provide full structure (x, y, series, labels, values, etc.)
+ 
+### 2. Chart Generation Rules
+
+- You MUST generate every chart type from the ApexCharts supported list that can be meaningfully constructed from the dataset.
+
+- For each chart type, if the dataset contains enough matching columns, you MUST output a valid config.
+
+- Do not skip or omit any chart type just because another chart type already represents similar data.
+
+- Even if multiple charts visualize similar aspects, you MUST still include them all, as long as they are valid ApexCharts charts for the dataset.
+
+- Always suggest at least 2 visually meaningful chart types based on the dataset.
+
+- Only suggest "table" if no other chart type can meaningfully represent the data.
+
+- Never produce extra commentary; output only valid JSON.
+ 
+### 3. Chart Config Rules
+ 
+- Trend/Time-Series: 'line','area'
+
+  {
+
+    "x":"date_col",
+
+    "series":[{"name":"Metric","y":"value_col"}],
+
+    "markers":{"size":5}
+
+  }
+ 
+- Comparison/Ranking: 'bar','radar'
+
+  {
+
+    "x":"category_col",
+
+    "series":[{"name":"Metric","y":"value_col"}]
+
+  }
+ 
+- Composition/Proportion: 'pie','donut','polarArea','radialBar'
+
+  {
+
+    "labels":["cat1","cat2",...],
+
+    "series":[val1,val2,...]
+
+  }
+
+  RULES:
+
+    * Only suggest these chart types if the query requests top N categories AND N ≤ 5.
+
+    * Always use exactly top N rows returned by the query.
+
+    * Do NOT calculate or include any "Other" slice.
+
+    * Total slices = top N rows only.
+ 
+- Distribution: 'histogram','boxPlot'
+
+  {
+
+    "x":"num_col",
+
+    "series":[{"name":"Count","y":"count_col"}]
+
+  }
+ 
+- Relationship: 'scatter','bubble'
+
+  {
+
+    "x":"metric1",
+
+    "y":"metric2",
+
+    "size":"metric3_optional"
+
+  }
+ 
+- Hierarchical/Matrix: 'heatmap','treemap'
+
+  {
+
+    "x":"cat1",
+
+    "y":"cat2",
+
+    "values":[...]
+
+  }
+ 
+- Range/Stock: 'rangeBar','candlestick'
+
+  {
+
+    "x":"date_or_cat",
+
+    "series":[{"name":"Metric","y":["low","high"]}]
+
+  }
+ 
+- Table (last resort): 'table'
+
+  {
+
+    "columns":["col1","col2",...]
+
+  }
+ 
+### 4. Strict Rules
+
+- Always return strictly valid JSON only; no explanations, no extra text.
+
+- Do NOT calculate or include any "Other" slice for Pie/Donut/PolarArea/RadialBar.
+
+- Strictly include ALL suitable ApexCharts chart types that the dataset can support.
+
+- “Suitable” means: if the dataset has the minimum required columns for that chart type (e.g., time + numeric for line, 2+ numerics for scatter, category + numeric for bar), then you MUST output it.
+
+- Numeric values must be taken exactly from the dataset, never estimated.
+
+- Line/Area charts must include markers to show individual points.
+
+- Do not truncate, skip, or limit the number of points, labels, or series.
+
 """
-    
 
-    if df.empty:
-        logger.warning("Empty DataFrame received for chart suggestion. Suggesting a table chart.")
-        return {
-            "title": question,
-            "charts": [{"chart_type": "table", "config": {"columns": []}}]
-        }
-
-    data_preview_list = []
-    try:
-        temp_df_for_preview = df.head(5).copy()
-        for col in temp_df_for_preview.columns:
-            if not pd.api.types.is_numeric_dtype(temp_df_for_preview[col]) and \
-               not pd.api.types.is_datetime64_any_dtype(temp_df_for_preview[col]) and \
-               not pd.api.types.is_bool_dtype(temp_df_for_preview[col]):
-                temp_df_for_preview[col] = temp_df_for_preview[col].apply(lambda x: str(x)[:100] if pd.notna(x) else None)
-            else:
-                temp_df_for_preview[col] = temp_df_for_preview[col].apply(lambda x: x.isoformat() if isinstance(x, pd.Timestamp) else x)
-
-        data_preview_list = temp_df_for_preview.to_dict(orient='records')
-    except Exception as e:
-        logger.error(f"Error preparing data_preview_list: {e}", exc_info=True)
-        data_preview_list = []
-        logger.warning("Proceeding with empty data_preview_list due to error during preparation.")
-
-
+ 
     # Identify column types for better LLM hints
     column_info = []
     for col in df.columns:
         dtype = str(df[col].dtype)
         is_numeric = pd.api.types.is_numeric_dtype(df[col])
         is_datetime = pd.api.types.is_datetime64_any_dtype(df[col])
-        # Simple heuristic for categorical: not numeric and few unique values
         is_categorical = not is_numeric and df[col].nunique() < min(len(df), 20)
 
         column_info.append({
@@ -286,69 +377,10 @@ STRICT RULES for chart suggestions:
             "is_numeric": is_numeric,
             "is_datetime": is_datetime,
             "is_categorical": is_categorical,
-            "unique_values": df[col].nunique() # Useful for cardinality
+            "unique_values": df[col].nunique()
         })
 
-    system_prompt = f"""
-    You are a data visualization expert. Given a user's question, the columns of the
-    resulting dataset, and their types, suggest the most appropriate chart type
-    and a default configuration for it.
-
-    Your response must be a single JSON object with two keys:
-    "chart_type": The suggested chart type ('bar', 'line', 'pie', 'scatter', 'table', 'area').
-    "reasoning": A brief explanation for the chart choice.
-    "chart_config": A JSON object containing specific configuration for the chart,
-                    especially column mappings.
-
-    Available chart types and their primary configurations:
-    - 'bar': For comparing categories. Needs 'x_column' (category) and 'y_column' (measure).
-    - 'line': For showing trends over time or ordered categories. Needs 'x_column' (time/order) and 'y_column' (measure).
-    - 'area': Similar to line, for showing magnitude of change over time. Needs 'x_column' (time/order) and 'y_column' (measure).
-    - 'pie': For showing proportions of a whole. Needs 'label_column' (category) and 'value_column' (measure).
-    - 'scatter': For showing relationships between two numerical variables. Needs 'x_column' (measure) and 'y_column' (measure).
-    - 'table': If the data is not suitable for a graphical chart or is best displayed as raw numbers. No specific column mappings needed for 'table'.
-
-    Consider these rules for column mapping:
-    - For 'x_column'/'y_column' in bar/line/area/scatter: Prioritize numerical columns for measures, and categorical/datetime for categories/time.
-    - For 'pie' chart: 'value_column' must be numerical. 'label_column' should be categorical and have a reasonable number of unique values (e.g., less than 15-20)
-    - If no obvious columns fit a chart type, or if there are too many columns for a simple chart (e.g., more than 2-3 main columns for visualization), default to 'table'.
-    - Ensure the suggested columns actually exist in the provided 'Resulting data columns'.
-
-    User's original question: "{question}"
-
-    Resulting data columns and their properties:
-    {json.dumps(column_info, indent=2)}
-
-    Data preview (first 5 rows):
-    {df.head().to_string()}
-
-    Please respond with ONLY a single, valid JSON object.
-    Example for a bar chart:
-    {{
-      "chart_type": "bar",
-      "reasoning": "Bar chart is suitable for comparing sales across different product categories.",
-      "chart_config": {{
-        "x_column": "product_category",
-        "y_column": "total_sales"
-      }}
-    }}
-    Example for a pie chart:
-    {{
-      "chart_type": "pie",
-      "reasoning": "Pie chart effectively shows the distribution of market share by region.",
-      "chart_config": {{
-        "label_column": "region",
-        "value_column": "market_share_percentage"
-      }}
-    }}
-    Example for a table:
-    {{
-      "chart_type": "table",
-      "reasoning": "The data is tabular and best viewed directly as a list of detailed records.",
-      "chart_config": {{}}
-    }}
-    """
-    logger.debug(f"User prompt for chart LLM:\n{user_prompt}")
+    logger.debug(f"User prompt for chart LLM:\n{system_prompt}")
 
     logger.info("Calling LLM for chart suggestion...")
     try:
@@ -356,7 +388,7 @@ STRICT RULES for chart suggestions:
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Given the question: '{question}' and data with columns {list(df.columns)}, suggest a chart type and configuration."}
+                {"role": "user", "content": f"Given the question: '{question}' and data with columns {list(df.columns)}, suggest chart types and configurations."}
             ],
             temperature=0.3, 
             response_format={"type": "json_object"}
@@ -364,23 +396,25 @@ STRICT RULES for chart suggestions:
         response_content = llm_response.choices[0].message.content
         chart_suggestion = json.loads(response_content)
 
-        # The 'data' field might be large, consider if you want to store it here
-        # or have the frontend re-fetch based on sql_query and dataset_id.
-        # For this PoC, storing it directly in chart_config is simpler for the frontend.
-        chart_suggestion['chart_config']['data'] = df.to_dict(orient="records")
-        chart_suggestion['chart_config']['columns'] = list(df.columns)
-        chart_suggestion['chart_config']['original_question'] = question
-        
+        # Enrich config with raw data for frontend
+        for chart in chart_suggestion.get("charts", []):
+            chart['config']['data'] = df.to_dict(orient="records")
+            chart['config']['columns'] = list(df.columns)
+            chart['config']['original_question'] = question
+
         return chart_suggestion
     except Exception as e:
         print(f"Error generating chart suggestion from LLM: {e}")
-        # Fallback to a default table suggestion if LLM fails
         return {
-            "chart_type": "table",
-            "reasoning": "Failed to generate a chart suggestion. Displaying as table.",
-            "chart_config": {
-                "data": df.to_dict(orient="records"),
-                "columns": list(df.columns),
-                "original_question": question
-            }
+            "title": question,
+            "charts": [
+                {
+                    "chart_type": "table",
+                    "config": {
+                        "data": df.to_dict(orient="records"),
+                        "columns": list(df.columns),
+                        "original_question": question
+                    }
+                }
+            ]
         }
