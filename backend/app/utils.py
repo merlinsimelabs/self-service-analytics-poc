@@ -216,9 +216,11 @@ Each chart object must include:
 
 ### 2. Chart Generation Rules
 - Generate ALL logically suitable chart types for the dataset and query.
-- Prefer visual charts; use "table" only if the data is unsuitable for visual representation.
-- Always generate at least 2 charts; maximum 6 for readability.
+- Prefer ApexCharts supporting visual charts; 
+- Always suggest at least 2 visually meaningful chart types based on the actual dataset.
+- Only suggest "table" if no other chart type can meaningfully represent the data.
 - Do not omit any chart type that can reasonably represent the data.
+
 
 ### 3. Chart Config Rules
 
@@ -292,39 +294,15 @@ Each chart object must include:
 - Do not truncate, skip, or limit the number of points, labels, or series under any circumstance.
 """
 
-
-
-    if df.empty:
-        logger.warning("Empty DataFrame received for chart suggestion. Suggesting a table chart.")
-        return {
-            "title": question,
-            "charts": [{"chart_type": "table", "config": {"columns": []}}]
-        }
-
-    data_preview_list = []
-    try:
-        temp_df_for_preview = df.head(5).copy()
-        for col in temp_df_for_preview.columns:
-            if not pd.api.types.is_numeric_dtype(temp_df_for_preview[col]) and \
-               not pd.api.types.is_datetime64_any_dtype(temp_df_for_preview[col]) and \
-               not pd.api.types.is_bool_dtype(temp_df_for_preview[col]):
-                temp_df_for_preview[col] = temp_df_for_preview[col].apply(lambda x: str(x)[:100] if pd.notna(x) else None)
-            else:
-                temp_df_for_preview[col] = temp_df_for_preview[col].apply(lambda x: x.isoformat() if isinstance(x, pd.Timestamp) else x)
-
-        data_preview_list = temp_df_for_preview.to_dict(orient='records')
-    except Exception as e:
-        logger.error(f"Error preparing data_preview_list: {e}", exc_info=True)
-        data_preview_list = []
-        logger.warning("Proceeding with empty data_preview_list due to error during preparation.")
-
-
     user_prompt = f"""
-    User's original question: "{question}"
-    Available data columns: {list(df.columns)}
-    Data preview (first 5 rows, as JSON):
-    {json.dumps(data_preview_list, indent=2)}
-    """
+User's original question: "{question}"
+
+Available columns in the dataset: {list(df.columns)}
+
+Data preview (first 5 rows, as JSON):
+{json.dumps(data_preview_list, indent=2)}
+"""
+
     logger.debug(f"User prompt for chart LLM:\n{user_prompt}")
 
     logger.info("Calling LLM for chart suggestion...")
